@@ -1,9 +1,8 @@
 // ==============================================================================
 // Program: lib.rs
 // Programmer: Ethan-da-Tech-Wizard
-// Course: CIS 156 / Advanced Systems
 // Last Modified: November 18, 2026
-// Purpose: Sovereign WebAssembly celestial & seasonal simulation engine
+// Purpose: High-performance WebAssembly celestial & seasonal simulation engine
 // ==============================================================================
 // twu-wasm-engine: Sovereign WebAssembly Celestial & Seasonal Rolling Engine
 // Written in pure Rust (#![no_std]). Zero external dependencies. Zero telemetry.
@@ -14,6 +13,13 @@
 //   - Eye-Level Negative Space: Clear vertical band protecting hero typography
 //   - Star Spectral Classifications & Coronas (Betelgeuse, Sirius, Vega, Antares, Polaris)
 //   - Zero-Allocation Buffer Export for 60 FPS GPU Rendering
+//
+// Technical Design Rationale:
+//   - Executed as a freestanding WebAssembly module without standard library (#![no_std]),
+//     eliminating memory allocator overhead and enabling sub-millisecond execution loops.
+//   - All state is pre-allocated into static contiguous float buffers, exposing raw pointers
+//     directly to JavaScript / WebGL via linear memory with zero-copy serialization.
+// ==============================================================================
 
 #![no_std]
 
