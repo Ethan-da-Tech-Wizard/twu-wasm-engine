@@ -1,3 +1,4 @@
+# Package metadata: name/version appear in the built artifact and on crates.io-style tooling.
 [package]
 name = "twu-wasm-engine"
 version = "0.1.0"
@@ -6,9 +7,15 @@ authors = ["Ethan-da-Tech-Wizard <224360887+Ethan-da-Tech-Wizard@users.noreply.g
 description = "WebAssembly Celestial & Seasonal Simulation Engine"
 license = "MIT OR Apache-2.0"
 
+
+# cdylib produces the .wasm file the web page loads; rlib lets other Rust code (and tests) link the same crate.
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+
+# Release profile tuned for the smallest, fastest wasm: maximum optimisation, whole-program link-time
+# optimisation, one codegen unit (slower build, better inlining), and abort-on-panic because the
+# no_std module has no unwinder and its panic handler just loops anyway.
 [profile.release]
 opt-level = 3
 lto = true
