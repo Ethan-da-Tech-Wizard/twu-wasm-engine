@@ -21,6 +21,15 @@
 //     directly to JavaScript / WebGL via linear memory with zero-copy serialization.
 // ==============================================================================
 
+// How it is used: the host page instantiates the .wasm, calls init_engine(w, h) once, then every
+// animation frame calls update_simulation(mouse_x, mouse_y, dt) and reads STAR_BUFFER and
+// LINE_BUFFER straight out of linear memory (pointers come from the exported functions below).
+// Known limits: single-threaded only (the `static mut` state is not synchronised); the catalog is
+// hand-placed art, not real ephemeris data, so positions are stylised rather than astronomically exact.
+// How to build: `cargo build --release --target wasm32-unknown-unknown`. A plain host build fails
+// (the freestanding panic handler below clashes with std's), so this crate has no host unit tests.
+//
+// The `no_std` attribute removes the standard library so the wasm output stays tiny and needs no allocator.
 #![no_std]
 
 // Total star slots exported to JavaScript: the catalog stars in CELESTIAL_STARS
@@ -92,6 +101,9 @@ fn sqrt_approx(val: f32) -> f32 {
 // One catalog star. ra/dec are normalised (0..1) sky coordinates: ra maps to
 // screen x (and wraps as the sky rolls), dec maps to screen y. `cid` and `color`
 // are stored as f32 only because they are copied straight into the f32 buffer.
+// Columns of one catalog row, in the order the fields are declared below. Radius is in pixels at the
+// reference canvas size (not rescaled on resize); pulse is the starting twinkle phase in radians
+// (0..2*pi), staggered by hand so neighbouring stars never blink in sync.
 // Rigid Celestial Star Prototype: [normalized_ra (0..1), normalized_dec (0..1), base_radius, pulse_phase, constellation_id, color_type]
 struct StarProto {
     ra: f32,
@@ -110,6 +122,8 @@ struct LineProto {
     cid: f32,
 }
 
+// Why 86: 74 named catalog stars (indices 0..73) plus 12 unnamed "ambient beacons" (74..85) that are
+// also pinned to the rolling sky. The array length is a compile-time check that none were dropped.
 // Hand-placed, rigid layout: stars keep their relative positions as the sky
 // scrolls, so constellation shapes never deform. The trailing numbers in the
 // line comments are the star's index, which CELESTIAL_LINES refers to.
@@ -311,8 +325,11 @@ static CELESTIAL_LINES: [LineProto; 67] = [
 #[no_mangle]
 pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
     unsafe {
+        // Tiny or zero sizes (e.g. a canvas that has not been laid out yet) would collapse the whole
+        // sky into one point, so anything <= 100 px falls back to the default 1080p canvas.
         WIDTH = if w > 100.0 { w } else { 1920.0 };
         HEIGHT = if h > 100.0 { h } else { 1080.0 };
+        // Restart the roll so a resize/re-init always begins from the authored catalog layout.
         CELESTIAL_SCROLL = 0.0;
 
         // Catalog stars start at their rest positions with zero velocity.
@@ -348,7 +365,10 @@ pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
             STAR_BUFFER[off + 7] = if pseudo_rand() > 0.75 { 1.0 } else { 0.0 };
         }
 
+        // Until the first update_simulation, report every segment as drawable so a renderer that
+        // reads the count before ticking does not see an empty sky.
         ACTIVE_LINE_COUNT = CELESTIAL_LINES.len();
+        // Marks that WIDTH/HEIGHT/buffers are valid; update_simulation checks this flag.
         INITIALIZED = true;
         TOTAL_STARS as u32
     }
@@ -363,6 +383,7 @@ pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
 #[no_mangle]
 pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32) -> *const f32 {
     unsafe {
+        // Guard for hosts that skip init_engine: without it the buffers would hold all zeros.
         if !INITIALIZED {
             init_engine(1920.0, 1080.0);
         }
@@ -373,6 +394,8 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
         // 0.009 turns of the sky per second: a full revolution takes about 111 s.
         // Continuous seasonal rolling speed (~0.00015 of celestial circumference per frame)
         CELESTIAL_SCROLL += 0.009 * dt;
+        // Subtract rather than reset to 0 so the fractional overshoot is kept and the roll
+        // stays smooth across the wrap.
         if CELESTIAL_SCROLL >= 1.0 {
             CELESTIAL_SCROLL -= 1.0;
         }
@@ -386,6 +409,8 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
 
             // Rolling Right Ascension
             let mut ra = p.ra + CELESTIAL_SCROLL;
+            // Wrap at the seam: a star leaving the right edge reappears on the left, giving the
+            // endless "rolling sphere" effect.
             if ra >= 1.0 { ra -= 1.0; }
             let mut sx = ra * WIDTH;
             let mut sy = p.dec * HEIGHT;
@@ -412,8 +437,11 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
             // Twinkle pulse
             let pulse_speed = if p.cid == 16.0 && i == 69 { 0.012 } else { 0.026 };
             let mut pulse = STAR_BUFFER[off + 5] + pulse_speed;
+            // Keep the phase bounded so f32 precision never degrades over long sessions.
             if pulse > 6.28318 { pulse -= 6.28318; }
 
+            // Radius, id and colour are rewritten every frame (they never change) so the buffer is
+            // fully self-describing even if JS cleared it. vx/vy (offsets 2 and 3) stay 0 from init.
             STAR_BUFFER[off]     = sx;
             STAR_BUFFER[off + 1] = sy;
             STAR_BUFFER[off + 4] = p.radius;
@@ -427,6 +455,7 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
         for i in CELESTIAL_STARS.len()..TOTAL_STARS {
             let off = i * FIELDS_PER_STAR;
             let mut sx = STAR_BUFFER[off] + 0.15;
+            // Same seam wrap as the catalog stars, in pixels because ambient stars have no RA.
             if sx > WIDTH { sx -= WIDTH; }
             let sy = STAR_BUFFER[off + 1];
             let mut pulse = STAR_BUFFER[off + 5] + 0.025;
@@ -451,6 +480,8 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
             let x2 = STAR_BUFFER[off_b];
             let y2 = STAR_BUFFER[off_b + 1];
 
+            // dx is the horizontal span in pixels. After a wrap one endpoint sits near x=0 and the
+            // other near x=WIDTH, so a span over half the canvas means "crosses the seam".
             // If a line is wrapping across the screen boundary (delta > width * 0.5), do not draw the long stretch line
             let dx = if x1 > x2 { x1 - x2 } else { x2 - x1 };
             if dx < WIDTH * 0.5 {
@@ -463,8 +494,11 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
                 valid_lines += 1;
             }
         }
+        // Tell the renderer how many leading segments of LINE_BUFFER are valid this frame.
         ACTIVE_LINE_COUNT = valid_lines;
 
+        // addr_of! takes the address without creating a reference to a `static mut`, which Rust
+        // 2024 lints against. JS receives this as an offset into wasm linear memory.
         core::ptr::addr_of!(STAR_BUFFER) as *const f32
     }
 }
