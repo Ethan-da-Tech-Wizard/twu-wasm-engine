@@ -23,27 +23,51 @@
 
 #![no_std]
 
+// Total star slots exported to JavaScript: the catalog stars in CELESTIAL_STARS
+// come first, and the remaining slots up to this count are procedural "ambient"
+// background stars.
 const TOTAL_STARS: usize = 128;
+// Layout of one star record in STAR_BUFFER (all f32, so JS can view the buffer
+// as a Float32Array and stride by FIELDS_PER_STAR). vx/vy are reserved and are
+// currently always 0; color_type selects the palette entry (see CELESTIAL_STARS).
 // Fields per star: [x, y, vx, vy, radius, pulse, constellation_id, color_type]
 const FIELDS_PER_STAR: usize = 8;
 const STAR_BUFFER_SIZE: usize = TOTAL_STARS * FIELDS_PER_STAR;
 
+// Upper bound on constellation segments the line buffer can hold; update loop
+// stops at this index even if the catalog grows.
 const MAX_LINES: usize = 96;
+// Layout of one segment in LINE_BUFFER: two endpoints in screen pixels plus the
+// constellation id so the renderer can colour a whole constellation consistently.
 // Fields per line: [x1, y1, x2, y2, constellation_id]
 const FIELDS_PER_LINE: usize = 5;
 const LINE_BUFFER_SIZE: usize = MAX_LINES * FIELDS_PER_LINE;
 
+// `static mut` is used because the module is single-threaded WASM with no
+// allocator: buffers live in linear memory at fixed addresses, and JS reads
+// them through the pointers returned by update_simulation and
+// get_constellation_lines_ptr. All access is inside `unsafe` blocks and relies
+// on JS never calling into the module re-entrantly or from several threads.
 // Static Memory Buffers (Allocated once, zero GC overhead)
 static mut STAR_BUFFER: [f32; STAR_BUFFER_SIZE] = [0.0; STAR_BUFFER_SIZE];
 static mut LINE_BUFFER: [f32; LINE_BUFFER_SIZE] = [0.0; LINE_BUFFER_SIZE];
 static mut ACTIVE_LINE_COUNT: usize = 0;
 
+// Canvas size in pixels (overwritten by init_engine); used to convert the
+// normalised catalog coordinates to screen space.
 static mut WIDTH: f32 = 1920.0;
 static mut HEIGHT: f32 = 1080.0;
+// Current right-ascension offset of the whole sky, 0.0..1.0, wraps at 1.0.
 static mut CELESTIAL_SCROLL: f32 = 0.0;
+// Lets update_simulation lazily call init_engine if JS forgot to.
 static mut INITIALIZED: bool = false;
+// Fixed seed so ambient star placement is identical on every page load.
 static mut SEED: u32 = 20261337;
 
+// Linear congruential generator (multiplier 1664525, increment 1013904223: the
+// well-known Numerical Recipes constants). Returns a float in [0, 1]. Quality
+// is irrelevant for scattering decorative stars; determinism and no_std are
+// what matter. Callers must hold `unsafe` since SEED is a static mut.
 // LCG Deterministic Pseudo-Random Generator
 fn pseudo_rand() -> f32 {
     unsafe {
@@ -52,6 +76,10 @@ fn pseudo_rand() -> f32 {
     }
 }
 
+// Square root by four Newton-Raphson iterations starting from `val` itself.
+// core has no f32::sqrt in no_std builds, hence this helper. It is only
+// accurate for the small distances used by the mouse lens (about 2..170 px);
+// with few iterations large inputs converge poorly, which is acceptable here.
 fn sqrt_approx(val: f32) -> f32 {
     if val <= 0.0 { return 0.0; }
     let mut x = val;
@@ -61,6 +89,9 @@ fn sqrt_approx(val: f32) -> f32 {
     x
 }
 
+// One catalog star. ra/dec are normalised (0..1) sky coordinates: ra maps to
+// screen x (and wraps as the sky rolls), dec maps to screen y. `cid` and `color`
+// are stored as f32 only because they are copied straight into the f32 buffer.
 // Rigid Celestial Star Prototype: [normalized_ra (0..1), normalized_dec (0..1), base_radius, pulse_phase, constellation_id, color_type]
 struct StarProto {
     ra: f32,
@@ -72,12 +103,16 @@ struct StarProto {
 }
 
 // Constellation Line Segment Prototype: [star_idx_a, star_idx_b, constellation_id]
+// One constellation segment, connecting two indices of CELESTIAL_STARS.
 struct LineProto {
     a: usize,
     b: usize,
     cid: f32,
 }
 
+// Hand-placed, rigid layout: stars keep their relative positions as the sky
+// scrolls, so constellation shapes never deform. The trailing numbers in the
+// line comments are the star's index, which CELESTIAL_LINES refers to.
 // Canonical Astronomical Catalog across 4 Seasons
 // Colors: 0 = Quantum Cyan, 1 = Arcane Violet, 2 = Amber/Red Giant, 3 = Diamond White/Polaris
 static CELESTIAL_STARS: [StarProto; 86] = [
@@ -202,6 +237,8 @@ static CELESTIAL_STARS: [StarProto; 86] = [
     StarProto { ra: 0.420, dec: 0.05, radius: 1.8, pulse: 2.7, cid: 0.0, color: 0.0 },
 ];
 
+// Segments per constellation, indexing into CELESTIAL_STARS above. The array
+// length must equal the number of LineProto entries or compilation fails.
 static CELESTIAL_LINES: [LineProto; 67] = [
     // Cassiopeia "W" (CID 1)
     LineProto { a: 0, b: 1, cid: 1.0 }, LineProto { a: 1, b: 2, cid: 1.0 },
@@ -265,6 +302,12 @@ static CELESTIAL_LINES: [LineProto; 67] = [
     LineProto { a: 71, b: 72, cid: 16.0 }, LineProto { a: 72, b: 73, cid: 16.0 }, LineProto { a: 73, b: 71, cid: 16.0 },
 ];
 
+/// Reset the simulation for a canvas of `w` x `h` pixels (falls back to
+/// 1920x1080 for values <= 100) and fill STAR_BUFFER.
+///
+/// Catalog stars are positioned from their normalised coordinates; the rest of
+/// the buffer is filled with pseudo-random ambient stars. Returns the number of
+/// star slots (TOTAL_STARS). Safe to call again to resize.
 #[no_mangle]
 pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
     unsafe {
@@ -272,6 +315,7 @@ pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
         HEIGHT = if h > 100.0 { h } else { 1080.0 };
         CELESTIAL_SCROLL = 0.0;
 
+        // Catalog stars start at their rest positions with zero velocity.
         // Initialize primary catalog stars
         for i in 0..CELESTIAL_STARS.len() {
             let p = &CELESTIAL_STARS[i];
@@ -288,6 +332,7 @@ pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
             STAR_BUFFER[off + 7] = p.color;
         }
 
+        // Ambient stars occupy random x positions; they are not part of the rolling sky.
         // Fill remaining buffer with subtle ambient stars
         for i in CELESTIAL_STARS.len()..TOTAL_STARS {
             let off = i * FIELDS_PER_STAR;
@@ -309,6 +354,12 @@ pub extern "C" fn init_engine(w: f32, h: f32) -> u32 {
     }
 }
 
+/// Advance the simulation by `delta_time` seconds and return a pointer to
+/// STAR_BUFFER (TOTAL_STARS * FIELDS_PER_STAR f32 values, read-only for JS).
+///
+/// `mouse_x`/`mouse_y` are canvas pixels; pass a negative value to disable the
+/// cursor lens. `delta_time` outside (0, 0.1) is treated as one 60 FPS frame so
+/// a stalled tab does not cause a large jump.
 #[no_mangle]
 pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32) -> *const f32 {
     unsafe {
@@ -316,14 +367,18 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
             init_engine(1920.0, 1080.0);
         }
 
+        // Clamp: ignore non-positive or huge timestep (e.g. after tab suspension).
         let dt = if delta_time > 0.0 && delta_time < 0.1 { delta_time } else { 0.016 };
 
+        // 0.009 turns of the sky per second: a full revolution takes about 111 s.
         // Continuous seasonal rolling speed (~0.00015 of celestial circumference per frame)
         CELESTIAL_SCROLL += 0.009 * dt;
         if CELESTIAL_SCROLL >= 1.0 {
             CELESTIAL_SCROLL -= 1.0;
         }
 
+        // Every catalog star is recomputed each frame from its catalog coordinates plus
+        // the global scroll, which is why the shapes stay rigid.
         // Update positions based on rigid celestial rotation
         for i in 0..CELESTIAL_STARS.len() {
             let p = &CELESTIAL_STARS[i];
@@ -335,6 +390,9 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
             let mut sx = ra * WIDTH;
             let mut sy = p.dec * HEIGHT;
 
+            // Stars within 170 px of the cursor are pushed radially outward; the push
+            // fades linearly to zero at the edge. The dist_sq > 4.0 guard avoids dividing
+            // by (near) zero when the cursor sits exactly on a star.
             // Subtle mouse interactive gravity lens
             if mouse_x >= 0.0 && mouse_y >= 0.0 {
                 let dx = sx - mouse_x;
@@ -349,6 +407,8 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
                 }
             }
 
+            // Pulse is a phase angle in radians (wraps at ~2*pi = 6.28318); the renderer
+            // turns it into brightness. Polaris (index 69) twinkles at about half speed.
             // Twinkle pulse
             let pulse_speed = if p.cid == 16.0 && i == 69 { 0.012 } else { 0.026 };
             let mut pulse = STAR_BUFFER[off + 5] + pulse_speed;
@@ -362,6 +422,7 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
             STAR_BUFFER[off + 7] = p.color;
         }
 
+        // Ambient stars drift right 0.15 px per frame and wrap horizontally.
         // Update ambient stars with gentle drift
         for i in CELESTIAL_STARS.len()..TOTAL_STARS {
             let off = i * FIELDS_PER_STAR;
@@ -376,6 +437,8 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
             STAR_BUFFER[off + 5] = pulse;
         }
 
+        // Only segments whose endpoints are on the same side of the wrap seam are
+        // emitted, packed contiguously from the start of LINE_BUFFER.
         // Compute Line Buffer with wrap awareness
         let mut valid_lines = 0;
         for (idx, line) in CELESTIAL_LINES.iter().enumerate() {
@@ -406,36 +469,46 @@ pub extern "C" fn update_simulation(mouse_x: f32, mouse_y: f32, delta_time: f32)
     }
 }
 
+/// Pointer to LINE_BUFFER; only the first get_constellation_lines_count()
+/// segments (FIELDS_PER_LINE f32 each) are valid after an update.
 #[no_mangle]
 pub extern "C" fn get_constellation_lines_ptr() -> *const f32 {
     core::ptr::addr_of!(LINE_BUFFER) as *const f32
 }
 
+/// Number of constellation segments written by the last update_simulation call.
 #[no_mangle]
 pub extern "C" fn get_constellation_lines_count() -> u32 {
     unsafe { ACTIVE_LINE_COUNT as u32 }
 }
 
+/// Number of star records in STAR_BUFFER (catalog + ambient).
 #[no_mangle]
 pub extern "C" fn get_particle_count() -> u32 {
     TOTAL_STARS as u32
 }
 
+/// Number of f32 values per star record, so JS can compute the stride.
 #[no_mangle]
 pub extern "C" fn get_fields_per_particle() -> u32 {
     FIELDS_PER_STAR as u32
 }
 
+/// Current sky roll offset in 0.0..1.0 (useful for syncing other layers).
 #[no_mangle]
 pub extern "C" fn get_celestial_scroll() -> f32 {
     unsafe { CELESTIAL_SCROLL }
 }
 
+/// Handshake used by the host page to confirm it loaded this module; always
+/// returns the constant 2026.
 #[no_mangle]
 pub extern "C" fn verify_sovereign_kernel() -> u32 {
     2026
 }
 
+/// With `panic = "abort"` and no_std there is nothing to unwind or print, so a
+/// panic just parks the thread (the module cannot recover from it).
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
