@@ -30,7 +30,7 @@
 // (the freestanding panic handler below clashes with std's), so this crate has no host unit tests.
 //
 // The `no_std` attribute removes the standard library so the wasm output stays tiny and needs no allocator.
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 // Total star slots exported to JavaScript: the catalog stars in CELESTIAL_STARS
 // come first, and the remaining slots up to this count are procedural "ambient"
@@ -543,7 +543,40 @@ pub extern "C" fn verify_sovereign_kernel() -> u32 {
 
 /// With `panic = "abort"` and no_std there is nothing to unwind or print, so a
 /// panic just parks the thread (the module cannot recover from it).
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_sovereign_kernel() {
+        assert_eq!(verify_sovereign_kernel(), 2026);
+    }
+
+    #[test]
+    fn test_engine_init_and_buffers() {
+        init_engine(1920.0, 1080.0);
+        let star_ptr = get_star_buffer_ptr();
+        assert!(!star_ptr.is_null());
+        let star_count = get_star_count();
+        assert_eq!(star_count, 128);
+
+        let line_ptr = get_line_buffer_ptr();
+        assert!(!line_ptr.is_null());
+        let line_count = get_line_count();
+        assert!(line_count > 0);
+    }
+
+    #[test]
+    fn test_simulation_step() {
+        init_engine(1920.0, 1080.0);
+        update_simulation(960.0, 540.0, 0.016);
+        let star_ptr = get_star_buffer_ptr();
+        assert!(!star_ptr.is_null());
+    }
 }

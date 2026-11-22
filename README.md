@@ -2,6 +2,14 @@
 
 Sovereign WebAssembly celestial sphere and seasonal astronomical simulation engine written in pure Rust (`#![no_std]`). Zero external dependencies, zero dynamic allocations at runtime, and zero telemetry.
 
+## Visual Walkthrough & Execution Previews
+
+### 1. Freestanding WebAssembly Compilation
+![WebAssembly Compilation](docs/assets/wasm_engine_compilation.svg)
+
+### 2. Zero-Copy WebGL Linear Memory Execution
+![WASM Execution](docs/assets/wasm_engine_memory_instantiation.svg)
+
 ## Features
 
 - **15 Astronomical Constellations**: Authentic star mappings accurately mapped across four seasonal cycles.
@@ -18,11 +26,27 @@ To build the WebAssembly module:
 cargo build --target wasm32-unknown-unknown --release
 ```
 
-The resulting optimized `.wasm` binary will be located at:
+The resulting optimized `.wasm` binary (8.6 KB) will be located at:
 
 ```
 target/wasm32-unknown-unknown/release/twu_wasm_engine.wasm
 ```
+
+## Tests & CI Verification
+
+Run the WebAssembly instantiation and simulation verification test:
+
+```bash
+node test_wasm.mjs
+```
+
+GitHub Actions CI (`.github/workflows/ci.yml`) compiles the WebAssembly binary and verifies test assertions on both Ubuntu and macOS.
+
+## Engineering Standards & Magi Bible 📖
+
+All code, documentation, and operational protocols follow the open-source **Magi AI Engineering Standard**:
+- **[MAGI_LOOK_HERE.md](MAGI_LOOK_HERE.md):** Contributor & autonomous agent operational rules, code of conduct, and verification criteria.
+- **[MAGI_BIBLE.md](MAGI_BIBLE.md):** The Universal Magi Bible establishing Rule 16 commentary ($\ge 25\%$), visual walkthrough previews, fail-closed boundaries, and standard library reliance.
 
 ## Projects by Ethan-da-Tech-Wizard
 

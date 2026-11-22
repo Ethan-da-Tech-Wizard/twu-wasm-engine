@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "twu_wasm_engine"
+name = "twu-wasm-engine"
 version = "0.1.0"

@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: wasm32 on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build WebAssembly release binary
+        run: cargo build --target wasm32-unknown-unknown --release
+      - name: Verify WASM binary size and existence
+        run: ls -lh target/wasm32-unknown-unknown/release/twu_wasm_engine.wasm
+      - name: Run WebAssembly execution tests
+        run: node test_wasm.mjs
